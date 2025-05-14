@@ -1,0 +1,47 @@
+# envs/job_generator.py
+import numpy as np
+from qiskit import QuantumCircuit
+
+
+class JobGenerator:
+    """
+    随机生成作业:
+    - max_qubits: 最大量子比特
+    - max_depth:  最大 CNOT 深度
+    - max_shots:  最大 shots
+    """
+
+    def __init__(self, max_qubits=8, max_depth=200, max_shots=8192):
+        self.max_q = max_qubits
+        self.max_d = max_depth
+        self.max_s = max_shots
+
+    def sample_job(self):
+        qubits = np.random.randint(1, self.max_q + 1)
+        depth = np.random.randint(10, self.max_d + 1)
+        shots = np.random.randint(128, self.max_s + 1)
+        return {
+            "qubits": qubits,
+            "depth": depth,
+            "shots": shots,
+            "wait": 0.0,  # 初始等待时间
+            "fid_req": np.random.uniform(0.8, 0.99),
+        }
+
+    def generate_circuit(self, qubits, depth):
+        qc = QuantumCircuit(qubits)
+        for _ in range(depth):
+            q1 = np.random.randint(0, qubits)
+            q2 = np.random.randint(0, qubits)
+            while q2 == q1:
+                q2 = np.random.randint(0, qubits)
+            qc.cx(q1, q2)  # 添加 CNOT 门
+        qc.measure_all()
+        return qc
+
+
+if __name__ == "__main__":
+    gen = JobGenerator()
+    job = gen.sample_job()
+    circuit = gen.generate_circuit(job["qubits"], job["depth"])
+    print(circuit)  # 打印 ASCII 格式的量子线路图

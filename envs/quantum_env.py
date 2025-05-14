@@ -1,0 +1,133 @@
+# envs/quantum_env.py
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+from .noise_models import SupconNoise
+from .job_generator import JobGenerator
+
+
+class QuantumSchedulerEnv(gym.Env):
+    """
+    最小量子调度环境：
+    - 3 台机器，队列最多 10 个作业
+    - 动作: 对每台机器选 {0..max_jobs} 索引，0 表示空闲
+    - 保真度计算: F = exp(-err * depth)
+    """
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, max_jobs: int = 10, num_machines: int = 3):
+        super().__init__()
+        self.max_jobs = max_jobs
+        self.num_machines = num_machines
+
+        # 初始化机器噪声模型
+        self.machines = [SupconNoise(base_error=np.random.uniform(0.005, 0.02))
+                         for _ in range(num_machines)]
+
+        self.job_gen = JobGenerator(max_qubits=8)
+
+        # -------- Gym Space 定义 --------
+        # 作业特征维度 5, 填充 0
+        self.obs_jobs = spaces.Box(0.0, 1.0, (self.max_jobs, 5), dtype=np.float32)
+        # 机器特征维度 6
+        self.obs_macs = spaces.Box(0.0, 1.0, (self.num_machines, 6), dtype=np.float32)
+        # 全局统计 3 维
+        self.obs_stats = spaces.Box(0.0, 1.0, (3,), dtype=np.float32)
+
+        self.observation_space = spaces.Dict(
+            {"jobs": self.obs_jobs, "macs": self.obs_macs, "stats": self.obs_stats}
+        )
+
+        # 动作 MultiDiscrete: 每台机器选择 [0, max_jobs] (0 空闲)
+        self.action_space = spaces.MultiDiscrete(
+            [self.max_jobs + 1] * self.num_machines
+        )
+
+        self.queue = []          # 当前等待作业列表
+        self.elapsed = 0         # 环境时间步
+
+    # ------------------------------------------------------------------ #
+    #  Gym 接口
+    # ------------------------------------------------------------------ #
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self.queue.clear()
+        self.elapsed = 0
+        # 初始生成 ≤5 个作业
+        for _ in range(np.random.randint(1, 6)):
+            self.queue.append(self.job_gen.sample_job())
+        return self._get_obs(), {}
+
+    def step(self, action):
+        """action: 长度 = num_machines, 每台机器指向 (1..max_jobs) 作业或 0 空闲"""
+        rewards = 0.0
+        info = {}
+        # 更新噪声 & 执行作业
+        for mac_idx, act in enumerate(action):
+            if act == 0:        # 空闲
+                continue
+            job_idx = act - 1
+            if job_idx >= len(self.queue):
+                # 选了不存在的作业 → 负奖励
+                rewards -= 1.0
+                continue
+            job = self.queue.pop(job_idx)
+            err = self.machines[mac_idx].step()
+            fidelity = np.exp(-err * job["depth"])
+            success = fidelity >= job["fid_req"]
+            # 奖励：成功 + fidelity – 等待惩罚
+            rewards += (1.0 if success else -1.0) + fidelity - 0.001 * job["wait"]
+
+        # 对所有机器运行一次 step() 让噪声漂移
+        for mac in self.machines:
+            mac.step()
+
+        # 全队列等待时间累加
+        for j in self.queue:
+            j["wait"] += 1.0
+
+        # 随机新作业到达（泊松 λ=2）
+        for _ in range(np.random.poisson(2)):
+            if len(self.queue) < self.max_jobs:
+                self.queue.append(self.job_gen.sample_job())
+
+        self.elapsed += 1
+        terminated = False      # 连续任务，无终止
+        truncated = False
+        return self._get_obs(), rewards, terminated, truncated, info
+
+    # ------------------------------------------------------------------ #
+    #  Helper 把环境当前状态打包成结构化、标准化、归一化的数值观测，用于喂给智能体去决策“选哪个作业给哪个机器处理”
+    # ------------------------------------------------------------------ #
+    def _get_obs(self):
+        # --- 作业特征 ---
+        jobs_arr = np.zeros((self.max_jobs, 5), dtype=np.float32)
+        for i, j in enumerate(self.queue):
+            jobs_arr[i] = np.array([
+                j["qubits"] / 8,
+                j["depth"] / 200,
+                j["shots"] / 8192,
+                min(j["wait"] / 100, 1.0),
+                j["fid_req"]
+            ], dtype=np.float32)
+
+        # --- 机器特征 ---
+        macs_arr = np.zeros((self.num_machines, 6), dtype=np.float32)
+        for i, mac in enumerate(self.machines):
+            macs_arr[i] = np.array([
+                8 / 8,                         # 可用 qubit, 简化为固定 8/8
+                mac.base,                      # 当前 base_err
+                0.5,                           # t1t2 score 固定
+                0.7,                           # connectivity score
+                0.0,                           # queue len (简化, 本版不维护队列)
+                (mac.t % mac.recalib) / mac.recalib
+            ], dtype=np.float32)
+
+        stats = np.array([
+            len(self.queue) / self.max_jobs,
+            np.mean([j["wait"] for j in self.queue]) / 100 if self.queue else 0.0,
+            self.elapsed / 1000
+        ], dtype=np.float32)
+
+        return {"jobs": jobs_arr, "macs": macs_arr, "stats": stats}
