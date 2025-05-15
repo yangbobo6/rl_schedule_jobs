@@ -1,14 +1,16 @@
+from gymnasium.wrappers import TimeLimit
 from sb3_contrib import MaskablePPO
-from sb3_contrib.common.maskable.utils import get_action_masks
+from sb3_contrib.common.wrappers import ActionMasker
 from envs.quantum_env_mask import QuantumSchedulerMaskEnv
 
+base_env = QuantumSchedulerMaskEnv()
 
 def mask_fn(env):
-    # SB3-Contrib 需要一个 “action_masks” callable
-    return env._get_action_mask()
+    return env._get_action_mask() # 确保返回一维数组
 
+wrapped = ActionMasker(base_env, mask_fn)
+env = TimeLimit(wrapped, max_episode_steps=2000)
 
-env = QuantumSchedulerMaskEnv()
 model = MaskablePPO(
     "MultiInputPolicy",
     env,
@@ -17,12 +19,9 @@ model = MaskablePPO(
     batch_size=128,
     tensorboard_log="logs_mask/",
     device="cuda",
-    verbose=1
+    verbose=1,
 )
 
-# 关键！注册 mask 回调
-# model.set_action_masks(mask_fn)
-
-model.learn(total_timesteps=20000)
+model.learn(total_timesteps=20_000)
 model.save("ppo_mask_v1")
 print("✅ Maskable PPO 训练 2w 步完成")
