@@ -4,6 +4,7 @@ import numpy as np
 from .noise_models import SupconNoise
 from .job_generator import JobGenerator
 
+SCALE = 0.001          # 奖励缩放系数
 
 class QuantumSchedulerMaskEnv(gym.Env):
     """
@@ -15,7 +16,7 @@ class QuantumSchedulerMaskEnv(gym.Env):
 
     def __init__(self,
                  max_jobs: int = 10,
-                 num_machines: int = 3,
+                 num_machines: int = 3, max_episode_steps=2000,
                  alpha=1.0, beta=0.001, gamma=1.0):
         super().__init__()
         self.max_jobs = max_jobs
@@ -32,6 +33,8 @@ class QuantumSchedulerMaskEnv(gym.Env):
 
         # 多离散拆分为 M*Discrete
         self.action_space = spaces.MultiDiscrete([self.max_jobs + 1] * self.M)
+
+        self.max_episode_steps = max_episode_steps
 
         self.observation_space = spaces.Dict(
             {"jobs": self.obs_jobs,
@@ -92,7 +95,17 @@ class QuantumSchedulerMaskEnv(gym.Env):
                 self.queue.append(self.job_gen.sample_job())
 
         self.elapsed += 1
-        return self._get_obs(), rewards, False, False, {}
+        # 奖励缩放
+        reward_scaled = rewards * SCALE
+
+        # 是否 TimeLimit 截断
+        terminated = False
+        truncated = False
+        if self.elapsed >= self.max_episode_steps:
+            truncated = True
+        # -------- 新增/修改结束 --------
+
+        return self._get_obs(), reward_scaled, terminated, truncated, {}
 
     # ------------------------------------------------------------------ #
     def _get_action_mask(self):
